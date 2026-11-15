@@ -3,6 +3,7 @@ package warmer
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -388,6 +389,78 @@ func TestUncachedSuffixCountsAgainstWarming(t *testing.T) {
 	f.clk.Advance(271 * time.Second)
 	if st := f.m.Status(); len(st) != 1 || st[0].Misses != 0 {
 		t.Errorf("a refresh that read the whole prefix counted as a miss: %+v", st)
+	}
+}
+
+func hourInput(t *testing.T, key string, u anthropic.Usage) ArmInput {
+	t.Helper()
+	in := armInput(t, key, "tool_use", 0)
+	in.Body = []byte(strings.Replace(body, `"ephemeral"`, `"ephemeral","ttl":"1h"`, 1))
+	info, err := anthropic.Inspect(in.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Info, in.Result.Usage = info, u
+	return in
+}
+
+// An upstream that turns the one hour the request asked for into five minutes must still be
+// kept warm, on the five minute schedule.
+func TestShortenedLifetimeIsWarmedOnTheShortSchedule(t *testing.T) {
+	f := newFixture(t, "idle", "")
+	f.m.Arm(hourInput(t, key('a'), anthropic.Usage{
+		CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral5m: 100_000},
+	}))
+	f.clk.Advance(271 * time.Second)
+	if f.up.count() != 1 {
+		t.Fatalf("%d refreshes at 271s of a five minute entry", f.up.count())
+	}
+
+	g := newFixture(t, "idle", "")
+	g.m.Arm(hourInput(t, key('a'), anthropic.Usage{
+		CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral1h: 100_000},
+	}))
+	g.clk.Advance(271 * time.Second)
+	if g.up.count() != 0 {
+		t.Errorf("%d refreshes: an entry written for one hour kept the five minute schedule", g.up.count())
+	}
+}
+
+// A reply that read the whole prefix says nothing about its lifetime; the first refresh that
+// writes does, and the schedule follows it from then on.
+func TestRefreshLearnsShortenedLifetime(t *testing.T) {
+	f := newFixture(t, "idle", "")
+	f.up.usage = anthropic.Usage{CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral5m: 100_000}, Output: 1}
+	f.m.Arm(hourInput(t, key('a'), anthropic.Usage{CacheRead: 100_000}))
+	f.clk.Advance(54*time.Minute + time.Second)
+	if f.up.count() != 1 {
+		t.Fatalf("%d refreshes at 54 minutes", f.up.count())
+	}
+	if st := f.m.Status(); len(st) != 1 || st[0].NextWarmAt.After(f.clk.Now().Add(5*time.Minute)) {
+		t.Fatalf("the next refresh is not on the five minute schedule: %+v", st)
+	}
+	f.up.usage = anthropic.Usage{CacheRead: 100_000, Output: 1}
+	f.clk.Advance(271 * time.Second)
+	if f.up.count() != 2 {
+		t.Errorf("%d refreshes after one five minute period", f.up.count())
+	}
+}
+
+// The schedule keeps the shorter lifetime once it is learned, but a refresh is billed for what
+// it reports having written.
+func TestRefreshCostFollowsReportedWriteLifetime(t *testing.T) {
+	f := newFixture(t, "idle", "")
+	f.up.usage = anthropic.Usage{CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral1h: 100_000}, Output: 1}
+	f.m.Arm(hourInput(t, key('a'), anthropic.Usage{
+		CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral5m: 100_000},
+	}))
+	f.clk.Advance(271 * time.Second)
+	if len(f.ledg.es) != 1 {
+		t.Fatalf("%d refreshes", len(f.ledg.es))
+	}
+	// 100k tokens written at $6 per million, plus one output token at $15 per million.
+	if got, want := f.ledg.es[0].CostUSD, 0.600015; math.Abs(got-want) > 1e-9 {
+		t.Errorf("cost %v, want %v", got, want)
 	}
 }
 

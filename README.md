@@ -25,7 +25,7 @@ warmproxy            # 或 warmproxy -config <path> -debug
 
 1. `POST /v1/messages` 且模型匹配 `match`：缓冲请求体（上限 `max_body_bytes`），其余原样转发。
 2. 应答边转发边解析 `usage` 和 `stop_reason`（SSE 或 JSON）。只有 200 且正常结束的应答（流要到 `message_stop`）才布防；客户端中途断开不布防。
-3. 布防：按会话保留一个 run，新请求覆盖旧 run。在 TTL 的 90%（至少留 10 秒余量）处重发。TTL 从真实请求发出时算起（应答耗时也在内），预热从发出时重新计时；失败的预热不延长缓存，只在原条目剩余寿命内每 10 秒重试。客户端不跟随重定向。
+3. 布防：按会话保留一个 run，新请求覆盖旧 run。在 TTL 的 90%（至少留 10 秒余量）处重发。TTL 取请求里最短的 `cache_control`；应答的 `usage.cache_creation` 里只要有 `ephemeral_5m_input_tokens`，就说明上游只给了 5 分钟，TTL 以 5 分钟为准（请求要 1 小时也一样）。应答只读缓存、没有写入时看不出 TTL，等某次预热写入后再按它校正。TTL 从真实请求发出时算起（应答耗时也在内），预热从发出时重新计时；失败的预热不延长缓存，只在原条目剩余寿命内每 10 秒重试。客户端不跟随重定向。
 4. 每次刷新前检查：模式、迟到保护（错过安全窗口就不发）、最长时长（流式 1 小时、空闲 30 分钟，从真实请求算起，预热不延长）、经济性。
 5. 经济性公式与 pi 相同：`P(继续) × max(0, miss − hit) − warm ≥ min_savings_usd`。`miss` 用 cache write 价，`hit` 用 cache read 价，`warm` 是一次 cache read、一个输出 token，再加上最后一个缓存断点之后的未缓存后缀（`input_tokens`）每次按普通输入价重付的费用。没有价格的模型不预热。
 6. 预热后读不到一半以上的缓存算 miss，连续 `stop_after_misses` 次就停止这个 run。

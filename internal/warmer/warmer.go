@@ -194,7 +194,9 @@ func (m *Manager) Arm(in ArmInput) {
 		// The agent is most likely still running: it will send the tool result.
 		phase = policy.PhaseStreaming
 	}
-	delay, delayOK := policy.Delay(in.Info.TTL)
+	// The upstream may keep what it wrote for less time than the request asked for.
+	ttl := in.Result.Usage.TTL(in.Info.TTL)
+	delay, delayOK := policy.Delay(ttl)
 	warm, werr := anthropic.WarmBody(in.Body)
 
 	reason := ""
@@ -213,7 +215,7 @@ func (m *Manager) Arm(in ArmInput) {
 		reason = "no price for model"
 	case !delayOK:
 		reason = "cache lifetime too short"
-	case now.After(deadlineOf(started.Add(delay), in.Info.TTL, delay)):
+	case now.After(deadlineOf(started.Add(delay), ttl, delay)):
 		reason = "cache entry expired before the reply ended"
 	case werr != nil:
 		reason = "request cannot be rewritten: " + werr.Error()
@@ -233,13 +235,13 @@ func (m *Manager) Arm(in ArmInput) {
 			Key: in.Key, Model: in.Info.Model, Path: in.Path, Query: in.Query,
 			Headers: ReplayHeaders(in.Header, m.cfg.SessionHeaders),
 			Tokens:  in.Result.Usage.Prompt(), Uncached: in.Result.Usage.Input,
-			TTL: in.Info.TTL, Phase: string(phase), StartedAt: started,
+			TTL: ttl, Phase: string(phase), StartedAt: started,
 		},
 		body: in.Body, warmBody: warm, price: price, delay: delay, ctx: ctx, cancel: cancel,
 	}
 	m.runs[in.Key] = r
 	m.scheduleLocked(r, started.Add(delay), true)
-	m.log.Debug("armed", "session", in.Key[:8], "model", r.m.Model, "phase", phase, "tokens", r.m.Tokens, "next", started.Add(delay).Sub(now))
+	m.log.Debug("armed", "session", in.Key[:8], "model", r.m.Model, "phase", phase, "tokens", r.m.Tokens, "ttl", ttl, "requested_ttl", in.Info.TTL, "next", started.Add(delay).Sub(now))
 }
 
 func (m *Manager) oldestLocked() string {
@@ -367,6 +369,12 @@ func (m *Manager) refresh(r *run) {
 		r.timer = m.clock.AfterFunc(retryDelay, func() { m.refresh(r) })
 		return
 	}
+	if ttl := usage.TTL(r.m.TTL); ttl < r.m.TTL {
+		// The first request wrote nothing that told the lifetime; this refresh did.
+		m.log.Info("upstream keeps the cache for less than requested", "session", r.m.Key[:8], "ttl", ttl, "requested_ttl", r.m.TTL)
+		r.m.TTL = ttl
+		r.delay, _ = policy.Delay(ttl)
+	}
 	r.m.Warms++
 	r.m.SpentUSD += entry.CostUSD
 	if entry.Hit {
@@ -438,12 +446,16 @@ func (m *Manager) send(r *run) (Entry, anthropic.Usage, outcome) {
 	}
 	u2 := res.Usage
 	e.Usage = u2
-	write := r.price.CacheWrite5m
-	if r.m.TTL >= time.Hour {
-		write = r.price.CacheWrite1h
+	// Bill each write at the price of the lifetime the reply reported; what it does not
+	// split follows the schedule's lifetime.
+	w5, w1 := u2.Creation.Ephemeral5m, u2.Creation.Ephemeral1h
+	if rest := max(0, u2.CacheWrite-w5-w1); r.m.TTL >= time.Hour {
+		w1 += rest
+	} else {
+		w5 += rest
 	}
 	e.CostUSD = (float64(u2.Input)*r.price.Input + float64(u2.CacheRead)*r.price.CacheRead +
-		float64(u2.CacheWrite)*write + float64(u2.Output)*r.price.Output) / 1e6
+		float64(w5)*r.price.CacheWrite5m + float64(w1)*r.price.CacheWrite1h + float64(u2.Output)*r.price.Output) / 1e6
 	// A refresh that read less than half of the cached prefix wrote it again instead.
 	e.Hit = u2.CacheRead*2 >= r.m.Tokens-r.m.Uncached
 	return e, u2, outcomeOK

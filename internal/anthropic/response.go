@@ -3,19 +3,37 @@ package anthropic
 import (
 	"bytes"
 	"encoding/json"
+	"time"
 )
 
 const maxSSELine = 1 << 20
+
+// CacheCreation splits the tokens written to the cache by lifetime.
+type CacheCreation struct {
+	Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+}
 
 type Usage struct {
 	Input      int `json:"input_tokens"`
 	Output     int `json:"output_tokens"`
 	CacheRead  int `json:"cache_read_input_tokens"`
 	CacheWrite int `json:"cache_creation_input_tokens"`
+	// Creation is zero when the reply wrote nothing or the upstream does not report the split.
+	Creation CacheCreation `json:"cache_creation"`
 }
 
 // Prompt is the size of the prompt the usage was reported for.
 func (u Usage) Prompt() int { return u.Input + u.CacheRead + u.CacheWrite }
+
+// TTL is how long the cache entry lives, given the lifetime the request asked for. An upstream
+// that gave some of what it wrote only five minutes has shortened it, whatever was asked.
+func (u Usage) TTL(requested time.Duration) time.Duration {
+	if u.Creation.Ephemeral5m > 0 {
+		return min(requested, 5*time.Minute)
+	}
+	return requested
+}
 
 type Result struct {
 	Usage      Usage
@@ -124,6 +142,8 @@ func (p *SSEParser) flush() {
 		}{
 			{&u.Input, ev.Usage.Input}, {&u.Output, ev.Usage.Output},
 			{&u.CacheRead, ev.Usage.CacheRead}, {&u.CacheWrite, ev.Usage.CacheWrite},
+			{&u.Creation.Ephemeral5m, ev.Usage.Creation.Ephemeral5m},
+			{&u.Creation.Ephemeral1h, ev.Usage.Creation.Ephemeral1h},
 		} {
 			if f.v > 0 {
 				*f.dst = f.v

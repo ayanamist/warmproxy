@@ -5,7 +5,7 @@
 ## 包布局
 
 - `internal/policy`：pi `cache-warming.ts` 的移植，纯函数：延迟、经济性公式。
-- `internal/anthropic`：解析请求（TTL、是否可重放）、构造预热体（`WarmBody`，除 `max_tokens` 和 `stream` 外字节不变）、解析 SSE 和 JSON 应答的 usage。
+- `internal/anthropic`：解析请求（TTL、是否可重放）、构造预热体（`WarmBody`，除 `max_tokens` 和 `stream` 外字节不变）、解析 SSE 和 JSON 应答的 usage（含 `cache_creation` 的 5m/1h 拆分，用来校正实际 TTL）。
 - `internal/warmer`：`Manager` 按会话维护 run、定时刷新、落盘恢复（`Store`）、记账（`Ledger`）。依赖 `clock.Clock` 和 `Doer`，测试用 `clock.Fake`。
 - `internal/proxy`：`ReverseProxy` 加响应 tap，边转发边解析，完整结束后才布防。
 - `internal/config`：TOML 配置，拒绝未知键；`config.example.toml` 是示例。
@@ -23,6 +23,14 @@
 - `NextWarmAt` 是绝对时刻，从最后一次读写缓存的请求**发出时**算起（真实请求用代理收到请求的时刻，预热用 `send` 开始的时刻），不用应答结束时刻。排队前和取得并发名额后都走完整的 `checkLocked`（缓存期限 `deadlineOf`、安全窗口、经济性），排队时间可能超过任一项。
 - 预热失败（429、5xx、网络错误）不延长缓存，不改 `NextWarmAt`，只每 `retryDelay` 重试一次，超过期限就停止。
 - 预热请求的 URL 直接调用 `httputil.ProxyRequest.SetURL` 构造，路径（包括转义和尾部斜杠）和查询参数与普通转发一致；`warmer.NewClient` 不跟随重定向。
+
+## 实际 TTL
+
+`Info.TTL` 只是请求想要的寿命。上游（magpie 或 Anthropic）可能把 1 小时降成 5 分钟，所以 run 的 `TTL` 取 `Usage.TTL(请求 TTL)`：应答 `usage.cache_creation.ephemeral_5m_input_tokens > 0` 就按 5 分钟，否则沿用请求值，永远不会比请求更长。
+
+- 只有写入了缓存的应答才带这个信息。全部读缓存的应答看不出 TTL，`Arm` 沿用请求值；之后某次预热写入（比如 1 小时的 TTL 实际是 5 分钟，54 分钟处那次预热 miss 并重写）报出 5 分钟，`refresh` 立刻把 `TTL` 和 `delay` 降下来，从这次预热起按 5 分钟排期。降级后再读缓存的应答不会把 TTL 升回去。
+- 预热的费用按应答里 5m/1h 的写入拆分分别按对应的 cache write 价计；拆分里没有的部分按 run 当前的 TTL 计。经济性检查（`EvaluateSplit`）用 run 的 TTL 取 cache write 价。
+- 上游不返回 `cache_creation` 拆分（非 Anthropic 后端）时没有校正，行为和以前一样。
 
 ## 经济性
 

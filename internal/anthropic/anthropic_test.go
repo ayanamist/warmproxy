@@ -81,7 +81,7 @@ func TestWarmBodyKeepsTheRest(t *testing.T) {
 }
 
 const stream = `event: message_start
-data: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":12,"cache_read_input_tokens":900,"cache_creation_input_tokens":88,"output_tokens":1}}}
+data: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":12,"cache_read_input_tokens":900,"cache_creation_input_tokens":88,"cache_creation":{"ephemeral_5m_input_tokens":88,"ephemeral_1h_input_tokens":0},"output_tokens":1}}}
 
 event: content_block_delta
 data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"message_stop in the text"}}
@@ -102,7 +102,7 @@ func TestSSEParser(t *testing.T) {
 			p.Feed([]byte(stream[i:min(i+step, len(stream))]))
 		}
 		r := p.Result()
-		want := Usage{Input: 12, Output: 40, CacheRead: 900, CacheWrite: 88}
+		want := Usage{Input: 12, Output: 40, CacheRead: 900, CacheWrite: 88, Creation: CacheCreation{Ephemeral5m: 88}}
 		if r.Usage != want || r.StopReason != "tool_use" || !r.Complete || r.Usage.Prompt() != 1000 {
 			t.Errorf("step %d: %+v", step, r)
 		}
@@ -126,6 +126,26 @@ func TestSSEParserIncomplete(t *testing.T) {
 	p.Feed([]byte("data: " + strings.Repeat("x", maxSSELine+10) + "\n" + stream))
 	if r := p.Result(); !r.Complete || r.Usage.Input != 12 {
 		t.Errorf("an oversized line must be skipped without losing the rest: %+v", r)
+	}
+}
+
+func TestUsageTTL(t *testing.T) {
+	five, hour := CacheCreation{Ephemeral5m: 10}, CacheCreation{Ephemeral1h: 10}
+	for _, tc := range []struct {
+		name      string
+		creation  CacheCreation
+		requested time.Duration
+		want      time.Duration
+	}{
+		{"hour cut to five minutes", five, time.Hour, 5 * time.Minute},
+		{"hour kept", hour, time.Hour, time.Hour},
+		{"nothing written", CacheCreation{}, time.Hour, time.Hour},
+		{"mixed writes follow the shorter", CacheCreation{Ephemeral5m: 1, Ephemeral1h: 1}, time.Hour, 5 * time.Minute},
+		{"never longer than requested", hour, 5 * time.Minute, 5 * time.Minute},
+	} {
+		if got := (Usage{Creation: tc.creation}).TTL(tc.requested); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
