@@ -427,11 +427,13 @@ func TestShortenedLifetimeIsWarmedOnTheShortSchedule(t *testing.T) {
 }
 
 // A reply that read the whole prefix says nothing about its lifetime; the first refresh that
-// writes does, and the schedule follows it from then on.
+// writes reports a shorter lifetime, and the schedule follows it from then on.
 func TestRefreshLearnsShortenedLifetime(t *testing.T) {
 	f := newFixture(t, "idle", "")
 	f.up.usage = anthropic.Usage{CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral5m: 100_000}, Output: 1}
-	f.m.Arm(hourInput(t, key('a'), anthropic.Usage{CacheRead: 100_000}))
+	f.m.Arm(hourInput(t, key('a'), anthropic.Usage{
+		CacheWrite: 100_000, Creation: anthropic.CacheCreation{Ephemeral1h: 100_000},
+	}))
 	f.clk.Advance(54*time.Minute + time.Second)
 	if f.up.count() != 1 {
 		t.Fatalf("%d refreshes at 54 minutes", f.up.count())

@@ -139,7 +139,7 @@ func TestUsageTTL(t *testing.T) {
 	}{
 		{"hour cut to five minutes", five, time.Hour, 5 * time.Minute},
 		{"hour kept", hour, time.Hour, time.Hour},
-		{"nothing written", CacheCreation{}, time.Hour, time.Hour},
+		{"missing lifetime split defaults to five minutes", CacheCreation{}, time.Hour, 5 * time.Minute},
 		{"mixed writes follow the shorter", CacheCreation{Ephemeral5m: 1, Ephemeral1h: 1}, time.Hour, 5 * time.Minute},
 		{"never longer than requested", hour, 5 * time.Minute, 5 * time.Minute},
 	} {

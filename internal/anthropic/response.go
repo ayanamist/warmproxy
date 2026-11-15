@@ -27,12 +27,16 @@ type Usage struct {
 func (u Usage) Prompt() int { return u.Input + u.CacheRead + u.CacheWrite }
 
 // TTL is how long the cache entry lives, given the lifetime the request asked for. An upstream
-// that gave some of what it wrote only five minutes has shortened it, whatever was asked.
+// that gave some of what it wrote only five minutes has shortened it; missing lifetime data
+// conservatively defaults to five minutes.
 func (u Usage) TTL(requested time.Duration) time.Duration {
 	if u.Creation.Ephemeral5m > 0 {
 		return min(requested, 5*time.Minute)
 	}
-	return requested
+	if u.Creation.Ephemeral1h > 0 {
+		return requested
+	}
+	return min(requested, 5*time.Minute)
 }
 
 type Result struct {
