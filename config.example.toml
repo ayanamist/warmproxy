@@ -4,25 +4,34 @@ listen = "127.0.0.1:3426"          # 非回环地址会告警：代理持有它�
 upstream = "http://127.0.0.1:3425" # magpie 网关；预热请求也只发往这里
 state_dir = "~/.local/state/warmproxy"
 match = "^claude-(sonnet|opus)"    # 只对匹配的模型预热，其余请求原样透传
-max_body_bytes = 33554432
+max_body_bytes = 33554432          # 可缓冲的请求体上限（字节），超过返回 413
+# 单次预热请求的总超时，包括连接、发送、等待和读取响应。
+# 真实请求不受此限制，长输出不会被它打断。
 request_timeout = "60s"
 
-# 按顺序取第一个存在的头作为会话 id；都没有时按对话开头（system、tools、首条消息）区分。
+# 按顺序取第一个存在的头作为会话 id；都没有时改用首条消息区分对话。system 和 tools 总是计入会话键，
+# 子 agent 沿用父 agent 的会话 id 时才不会互相覆盖。
 session_headers = [
   "X-Magpie-Session", "X-Session-Affinity", "Session_id",
   "X-Opencode-Session", "X-Claude-Code-Session-Id", "X-Conversation-Id",
 ]
 
 [warm]
-mode = "idle"                # off | streaming | idle
-streaming_continue_p = 1.0   # agent 仍在运行（stop_reason 为 tool_use）时，下一次请求到来的概率
-idle_continue_p = 0.15       # pi 实测的空闲概率
+# off：不预热，只透传。streaming：只预热 stop_reason 为 tool_use 的会话（agent 很可能还在跑）。
+# idle：再加上已结束一轮（end_turn 等）的会话，但要过经济性检查。
+mode = "idle"
+# 会话后续继续、使用所保留缓存的估计概率，用于经济性公式
+# P(继续) × (cache write − cache read) − 预热成本 ≥ min_savings_usd。
+streaming_continue_p = 1.0   # stop_reason 为 tool_use：agent 仍在运行
+idle_continue_p = 0.15       # 其他情况，pi 实测值
+# 一次预热的预期净收益至少要有这么多美元，否则不预热（也就是不值得为小前缀付费）。
 min_savings_usd = 0.05
-max_concurrent = 4
-max_sessions = 256
-stop_after_misses = 2        # 连续几次预热没读到缓存就停止
-max_age_streaming = "1h"
-max_age_idle = "30m"
+max_concurrent = 4           # 同时在途的预热请求数，多出的排队，排队后到期仍会放弃
+max_sessions = 256           # 同时保留的预热任务数，超过时最旧的先被淘汰
+stop_after_misses = 2        # 连续几次预热读到的缓存不足前缀一半就停止该任务
+# 从真实请求发出起算的最长预热时长，预热不延长；到点停止。
+max_age_streaming = "1h"     # tool_use 会话
+max_age_idle = "30m"         # 其余会话
 
 # 价格：美元 / 百万 token，取自 models.dev（2026-11-14）。没有匹配的价格就不预热。
 # cache_read、cache_write_5m、cache_write_1h 省略时按 input 的 0.1、1.25、2 倍推算。
