@@ -1,0 +1,58 @@
+# 复制到 ~/.config/warmproxy/config.toml。未知键会被拒绝，拼写错误不会悄悄改变策略。
+
+listen = "127.0.0.1:3426"          # 非回环地址会告警：代理持有它见过的所有凭证
+upstream = "http://127.0.0.1:3425" # magpie 网关；预热请求也只发往这里
+state_dir = "~/.local/state/warmproxy"
+match = "^claude-(sonnet|opus)"    # 只对匹配的模型预热，其余请求原样透传
+max_body_bytes = 33554432
+request_timeout = "60s"
+
+# 按顺序取第一个存在的头作为会话 id；都没有时按对话开头（system、tools、首条消息）区分。
+session_headers = [
+  "X-Magpie-Session", "X-Session-Affinity", "Session_id",
+  "X-Opencode-Session", "X-Claude-Code-Session-Id", "X-Conversation-Id",
+]
+
+[warm]
+mode = "idle"                # off | streaming | idle
+streaming_continue_p = 1.0   # agent 仍在运行（stop_reason 为 tool_use）时，下一次请求到来的概率
+idle_continue_p = 0.15       # pi 实测的空闲概率
+min_savings_usd = 0.05
+max_concurrent = 4
+max_sessions = 256
+stop_after_misses = 2        # 连续几次预热没读到缓存就停止
+max_age_streaming = "1h"
+max_age_idle = "30m"
+
+# 价格：美元 / 百万 token，取自 models.dev（2026-11-14）。没有匹配的价格就不预热。
+# cache_read、cache_write_5m、cache_write_1h 省略时按 input 的 0.1、1.25、2 倍推算。
+[[model]]
+match = "^claude-sonnet-5-5"
+input = 2
+output = 10
+cache_read = 0.1
+cache_write_5m = 2.5
+
+[[model]]
+match = "^claude-sonnet-5"
+input = 2
+output = 10
+cache_read = 0.2
+cache_write_5m = 2.5
+
+[[model]]
+match = "^claude-sonnet-4"
+input = 3
+output = 15
+
+[[model]]
+match = "^claude-opus-5-5"
+input = 4
+output = 20
+cache_read = 0.2
+cache_write_5m = 5
+
+[[model]]
+match = "^claude-opus-"
+input = 5
+output = 25

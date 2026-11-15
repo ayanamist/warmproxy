@@ -1,0 +1,11 @@
+[Unit]
+Description=warmproxy: prompt cache warming in front of magpie
+After=network.target
+
+[Service]
+ExecStart=%h/.local/bin/warmproxy
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
