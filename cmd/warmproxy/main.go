@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -36,7 +35,7 @@ func defaultConfig() string {
 
 func run() error {
 	path := flag.String("config", defaultConfig(), "path of the TOML configuration")
-	debug := flag.Bool("debug", false, "log every arming decision")
+	debug := flag.Bool("debug", false, "log skipped warming decisions")
 	flag.Parse()
 
 	cfg, err := config.Load(*path)
@@ -65,6 +64,12 @@ func run() error {
 	}
 	defer ledger.Close()
 
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+
 	// The upstream is a local program: never through an environment proxy.
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 16, IdleConnTimeout: 90 * time.Second,
@@ -77,7 +82,7 @@ func run() error {
 	if err != nil {
 		log.Warn("restoring saved runs failed", "err", err)
 	}
-	log.Info("warmproxy up", "listen", cfg.Listen, "upstream", cfg.Upstream.String(), "mode", cfg.Mode, "restored", n)
+	log.Info("warmproxy up", "listen", ln.Addr().String(), "upstream", cfg.Upstream.Host, "mode", cfg.Mode, "restored", n)
 
 	srv := &http.Server{
 		Addr: cfg.Listen, Handler: proxy.New(cfg, mgr, transport, log),
@@ -86,7 +91,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	failed := make(chan error, 1)
-	go func() { failed <- srv.ListenAndServe() }()
+	go func() { failed <- srv.Serve(ln) }()
 
 	select {
 	case err := <-failed:
@@ -96,9 +101,10 @@ func run() error {
 	}
 	sd, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(sd); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+	if err := srv.Shutdown(sd); err != nil {
 		log.Warn("shutdown", "err", err)
 	}
 	mgr.Close()
+	log.Info("warmproxy stopped")
 	return nil
 }

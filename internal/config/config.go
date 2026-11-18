@@ -117,7 +117,7 @@ func build(f file) (*Config, error) {
 	}
 	var err error
 	if c.Upstream, err = url.Parse(f.Upstream); err != nil || c.Upstream.Host == "" || c.Upstream.Scheme == "" {
-		return nil, fmt.Errorf("upstream %q is not an absolute URL", f.Upstream)
+		return nil, fmt.Errorf("upstream is not an absolute URL")
 	}
 	if c.StateDir, err = expand(f.StateDir); err != nil {
 		return nil, err

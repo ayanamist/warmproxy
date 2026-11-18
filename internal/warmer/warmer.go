@@ -64,7 +64,7 @@ type ArmInput struct {
 type run struct {
 	m        meta
 	body     []byte // the request as sent
-	warmBody []byte // the same with max_tokens 1 and no streaming
+	warmBody []byte // the same with a one-token output limit and no streaming
 	price    policy.Price
 	delay    time.Duration
 	timer    clock.Stopper
@@ -107,7 +107,7 @@ func New(o Options) *Manager {
 // its parent's session id but not these), and the session the agent named or, when it names
 // none, how the conversation opens. The model is left out on purpose: switching models within
 // a session replaces the run, as the new request is what wrote the newest cache entry.
-func Key(h http.Header, sessionHeaders []string, info anthropic.Info) string {
+func Key(path string, h http.Header, sessionHeaders []string, info anthropic.Info) string {
 	sid := ""
 	for _, n := range sessionHeaders {
 		if v := strings.TrimSpace(h.Get(n)); v != "" {
@@ -116,6 +116,9 @@ func Key(h http.Header, sessionHeaders []string, info anthropic.Info) string {
 		}
 	}
 	sum := sha256.New()
+	if path == anthropic.ChatPath {
+		sum.Write([]byte(anthropic.ChatPath + "\x00"))
+	}
 	for _, part := range [][]byte{[]byte(h.Get("X-Api-Key")), []byte(h.Get("Authorization"))} {
 		sum.Write(part)
 		sum.Write([]byte{0})
@@ -197,7 +200,7 @@ func (m *Manager) Arm(in ArmInput) {
 	// The upstream may keep what it wrote for less time than the request asked for.
 	ttl := in.Result.Usage.TTL(in.Info.TTL)
 	delay, delayOK := policy.Delay(ttl)
-	warm, werr := anthropic.WarmBody(in.Body)
+	warm, werr := anthropic.WarmRequest(in.Path, in.Body)
 
 	reason := ""
 	switch {
@@ -209,6 +212,8 @@ func (m *Manager) Arm(in ArmInput) {
 		reason = in.Info.Reason
 	case !in.Info.Cacheable:
 		reason = "request has no cache_control"
+	case in.Path == anthropic.ChatPath && in.Result.Usage.CacheRead == 0 && in.Result.Usage.CacheWrite == 0:
+		reason = "chat reply reported no cached tokens"
 	case in.Result.Usage.Prompt() == 0:
 		reason = "reply reported no prompt tokens"
 	case !priced:
@@ -218,11 +223,11 @@ func (m *Manager) Arm(in ArmInput) {
 	case now.After(deadlineOf(started.Add(delay), ttl, delay)):
 		reason = "cache entry expired before the reply ended"
 	case werr != nil:
-		reason = "request cannot be rewritten: " + werr.Error()
+		reason = "request cannot be rewritten"
 	}
 	if reason != "" {
 		m.store.Delete(in.Key)
-		m.log.Debug("not warming", "session", in.Key[:8], "model", in.Info.Model, "reason", reason)
+		m.log.Debug("not warming", "session", in.Key[:8], "path", in.Path, "model", in.Info.Model, "reason", reason)
 		return
 	}
 
@@ -241,7 +246,7 @@ func (m *Manager) Arm(in ArmInput) {
 	}
 	m.runs[in.Key] = r
 	m.scheduleLocked(r, started.Add(delay), true)
-	m.log.Debug("armed", "session", in.Key[:8], "model", r.m.Model, "phase", phase, "tokens", r.m.Tokens, "ttl", ttl, "requested_ttl", in.Info.TTL, "next", started.Add(delay).Sub(now))
+	m.log.Info("warming scheduled", "session", in.Key[:8], "path", in.Path, "model", r.m.Model, "phase", phase, "tokens", r.m.Tokens, "ttl", ttl, "next", started.Add(delay).Sub(now))
 }
 
 func (m *Manager) oldestLocked() string {
@@ -361,6 +366,7 @@ func (m *Manager) refresh(r *run) {
 		return
 	case outcomeRetry:
 		// The failed refresh did not extend the cache entry: retry only while it lives.
+		m.log.Warn("refresh failed", "session", r.m.Key[:8], "path", r.m.Path, "status", entry.Status, "reason", entry.Error)
 		if m.clock.Now().Add(retryDelay).After(deadlineOf(r.m.NextWarmAt, r.m.TTL, r.delay)) {
 			m.stopLocked(r.m.Key, true)
 			m.log.Info("warming stopped", "session", r.m.Key[:8], "reason", "cache entry expired")
@@ -379,6 +385,7 @@ func (m *Manager) refresh(r *run) {
 	r.m.SpentUSD += entry.CostUSD
 	if entry.Hit {
 		r.m.Misses = 0
+		m.log.Info("refresh hit cache", "session", r.m.Key[:8], "path", r.m.Path, "cache_read", usage.CacheRead, "cost_usd", entry.CostUSD)
 	} else {
 		r.m.Misses++
 		m.log.Warn("refresh missed the cache", "session", r.m.Key[:8], "prompt", r.m.Tokens, "cache_read", usage.CacheRead)
@@ -414,7 +421,7 @@ func (m *Manager) send(r *run) (Entry, anthropic.Usage, outcome) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://replay.invalid"+r.m.Path, bytes.NewReader(r.warmBody))
 	if err != nil {
-		e.Error = err.Error()
+		e.Error = "invalid replay URL"
 		return e, anthropic.Usage{}, outcomeStop
 	}
 	req.URL.RawQuery = r.m.Query
@@ -424,22 +431,32 @@ func (m *Manager) send(r *run) (Entry, anthropic.Usage, outcome) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.doer.Do(req)
 	if err != nil {
-		e.Error = err.Error()
+		e.Error = "upstream request failed"
 		e.Millis = m.clock.Now().Sub(start).Milliseconds()
 		return e, anthropic.Usage{}, outcomeRetry
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	e.Status = resp.StatusCode
 	e.Millis = m.clock.Now().Sub(start).Milliseconds()
 	switch {
 	case resp.StatusCode == http.StatusOK:
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		e.Error = "retryable upstream status"
 		return e, anthropic.Usage{}, outcomeRetry
 	default:
 		return e, anthropic.Usage{}, outcomeStop
 	}
-	res, ok := anthropic.ParseJSON(raw)
+	const maxReply = 1 << 20
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxReply+1))
+	e.Millis = m.clock.Now().Sub(start).Milliseconds()
+	if readErr != nil || len(raw) > maxReply {
+		e.Error = "incomplete or oversized reply"
+		return e, anthropic.Usage{}, outcomeRetry
+	}
+	res, ok := anthropic.ParseReply(r.m.Path, raw)
+	if r.m.Path == anthropic.ChatPath && res.Usage.Prompt() == 0 {
+		ok = false
+	}
 	if !ok {
 		e.Error = "unreadable reply"
 		return e, anthropic.Usage{}, outcomeRetry
@@ -474,7 +491,7 @@ func (m *Manager) Restore() (int, error) {
 	for _, s := range saved {
 		price, priced := m.cfg.RuleFor(s.Model)
 		delay, delayOK := policy.Delay(s.TTL)
-		warm, werr := anthropic.WarmBody(s.body)
+		warm, werr := anthropic.WarmRequest(s.Path, s.body)
 		if m.cfg.Mode == "off" || !priced || !delayOK || werr != nil || now.After(deadlineOf(s.NextWarmAt, s.TTL, delay)) ||
 			now.Sub(s.StartedAt) > m.maxAge(s.Phase) || len(m.runs) >= m.cfg.MaxSessions {
 			m.store.Delete(s.Key)

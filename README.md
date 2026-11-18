@@ -1,10 +1,10 @@
 # warmproxy
 
-放在 magpie 前面的反向代理，用 Go 写，对 `claude-sonnet*` 和 `claude-opus*` 的 `/v1/messages` 请求做提示缓存预热，策略移植自 pi 的 `cache-warming`。其他请求原样透传。
+放在 magpie 前面的 Go 反向代理，对 `claude-sonnet*` 和 `claude-opus*` 的 `/v1/messages` 和 `/v1/chat/completions` 请求做提示缓存预热，策略移植自 pi 的 `cache-warming`。其他请求透传。
 
 ```
 客户端(agent) → warmproxy :3426 → magpie :3425 → Anthropic
-                        └─ 到期前把上一次请求重发一次（max_tokens=1）
+                        └─ 到期前重发上一次请求，输出上限为一个 token
 ```
 
 为什么是代理而不是 magpie 插件：代理能拿到客户端自己的凭证和完整请求头、能读到响应里的 `usage`，定时器也不受插件宿主重载影响。
@@ -17,26 +17,39 @@ mkdir -p ~/.config/warmproxy && cp config.example.toml ~/.config/warmproxy/confi
 warmproxy            # 或 warmproxy -config <path> -debug
 ```
 
-把 agent 的 Anthropic base URL 改成 `http://127.0.0.1:3426`。systemd user 单元见 `contrib/warmproxy.service`。
+Anthropic 客户端的 Base URL 用 `http://127.0.0.1:3426`，Chat Completions 客户端用 `http://127.0.0.1:3426/v1`。
+
+systemd user 单元见 [contrib/warmproxy.service](contrib/warmproxy.service)。程序把启动、上游响应状态、预热排期、刷新结果和关闭等日志写到 stderr，示例单元将 stderr 接入 journal。
+
+```bash
+journalctl --user -u warmproxy.service -n 50
+journalctl --user -u warmproxy.service -f
+```
+
+想查看跳过预热的原因时，在服务的 `ExecStart` 后加 `-debug`。日志不记录请求体、凭证或 URL 查询参数。
 
 状态：`curl http://127.0.0.1:3426/_warm/status`（仅回环地址）。每次预热一行记录在 `<state_dir>/ledger.jsonl`，不含请求内容。
 
 ## 工作方式
 
-1. `POST /v1/messages` 且模型匹配 `match`：缓冲请求体（上限 `max_body_bytes`），其余原样转发。
-2. 应答边转发边解析 `usage` 和 `stop_reason`（SSE 或 JSON）。只有 200 且正常结束的应答（流要到 `message_stop`）才布防；客户端中途断开不布防。
+1. 检查 `POST /v1/messages` 和 `POST /v1/chat/completions` 请求体，按 `match` 筛选模型。Chat 请求体达到 `max_body_bytes` 检查上限时继续透传。
+2. 应答边转发边解析 `usage` 和结束原因。只有 HTTP 200 且正常结束的应答才可布防，Messages SSE 要收到 `message_stop`，Chat SSE 要收到 `finish_reason` 和 `[DONE]`。客户端中途断开不布防。
 3. 布防：按会话保留一个 run，新请求覆盖旧 run。在 TTL 的 90%（至少留 10 秒余量）处重发。TTL 取请求里最短的 `cache_control`；应答的 `usage.cache_creation` 里只要有 `ephemeral_5m_input_tokens`，就说明上游只给了 5 分钟，TTL 以 5 分钟为准（请求要 1 小时也一样）。应答只读缓存、没有写入时看不出 TTL，等某次预热写入后再按它校正。TTL 从真实请求发出时算起（应答耗时也在内），预热从发出时重新计时；失败的预热不延长缓存，只在原条目剩余寿命内每 10 秒重试。客户端不跟随重定向。
 4. 每次刷新前检查：模式、迟到保护（错过安全窗口就不发）、最长时长（流式 1 小时、空闲 30 分钟，从真实请求算起，预热不延长）、经济性。
 5. 经济性公式与 pi 相同：`P(继续) × max(0, miss − hit) − warm ≥ min_savings_usd`。`miss` 用 cache write 价，`hit` 用 cache read 价，`warm` 是一次 cache read、一个输出 token，再加上最后一个缓存断点之后的未缓存后缀（`input_tokens`）每次按普通输入价重付的费用。没有价格的模型不预热。
 6. 预热后读不到一半以上的缓存算 miss，连续 `stop_after_misses` 次就停止这个 run。
 
-**阶段近似**：代理看不到 agent 是否还在运行，`stop_reason` 为 `tool_use` 按 streaming（P=1），其余按 idle（P=0.15）。`mode = "streaming"` 只预热前者。
+**阶段近似**：Messages 的 `tool_use` 和 Chat 的 `tool_calls`（含旧版 `function_call`）按 streaming（P=1），其余按 idle（P=0.15）。`mode = "streaming"` 只预热前者。
 
-**不预热的请求**：没有 `cache_control`；`thinking.type = "enabled"`（预算式 thinking 的 `budget_tokens` 随 `max_tokens` 变，重发会变成另一个请求）；带 `thread` 字段的请求（续用服务端状态）。
+**Messages** 要求请求带 `cache_control`。预算式 thinking 和续用服务端 `thread` 的请求不预热。
+
+**Chat Completions** 依赖 magpie 转译为 Anthropic 请求时添加缓存标记。响应的 `usage.prompt_tokens_details` 必须报告正数的 `cached_tokens` 或 `cache_write_tokens` 才会布防。Chat 响应缺少 TTL 拆分，排期按 5 分钟。预热沿用原路径，关闭流式输出，移除 `stream_options`，将 `max_tokens` 或 `max_completion_tokens` 设为 1。显式推理设置（`reasoning_effort: "none"` 除外）、服务端会话、网页搜索和多候选请求跳过预热。
 
 ## 会话键
 
 `sha256(x-api-key | authorization | system | tools | 会话 id)`。会话 id 按 `session_headers` 顺序取第一个存在的头（magpie 的 `sessionOf` 读的就是这些：`X-Magpie-Session` 优先，然后是 agent 自己的），都没有时改用首条消息的内容。`system` 和 `tools` 进键，是因为子 agent 会沿用父 agent 的会话 id，两者的缓存前缀不同，必须各有各的 run。模型不进键：同一会话换模型时，新请求写入的才是最新缓存，直接覆盖。
+
+Chat 的会话键带协议前缀，用 `system` 和 `developer` 消息识别指令，并纳入 `prompt_cache_key`。
 
 ## 重启
 

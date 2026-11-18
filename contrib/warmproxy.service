@@ -4,6 +4,8 @@ After=network.target
 
 [Service]
 ExecStart=%h/.local/bin/warmproxy
+StandardOutput=journal
+StandardError=journal
 Restart=on-failure
 RestartSec=2
 

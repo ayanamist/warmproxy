@@ -98,11 +98,15 @@ func note(cc map[string]any, ttl *time.Duration) {
 
 // WarmBody is body with max_tokens 1 and stream false, every other byte as sent.
 func WarmBody(body []byte) ([]byte, error) {
+	return rewrite(body, "max_tokens", false)
+}
+
+func rewrite(body []byte, limit string, chat bool) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return nil, errors.New("request body is not an object")
 	}
-	over := map[string]string{"max_tokens": "1", "stream": "false"}
+	over := map[string]string{limit: "1", "stream": "false"}
 	done := map[string]bool{}
 	var out bytes.Buffer
 	out.WriteByte('{')
@@ -125,12 +129,15 @@ func WarmBody(body []byte) ([]byte, error) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, err
 		}
+		if chat && (key == "stream_options" || limit == "max_completion_tokens" && key == "max_tokens") {
+			continue
+		}
 		if v, ok := over[key]; ok {
 			raw, done[key] = []byte(v), true
 		}
 		put(key, raw)
 	}
-	for _, key := range []string{"max_tokens", "stream"} {
+	for _, key := range []string{limit, "stream"} {
 		if !done[key] {
 			put(key, []byte(over[key]))
 		}

@@ -72,14 +72,17 @@ func ParseJSON(b []byte) (Result, bool) {
 	return Result{Usage: m.Usage, StopReason: m.StopReason, Complete: true}, true
 }
 
-// SSEParser follows a Messages event stream as it passes by, keeping only usage and the stop reason.
+// SSEParser follows a Claude event stream, keeping only usage and the stop reason.
 type SSEParser struct {
+	chat bool
 	line []byte
 	over bool
 	res  Result
 	stop bool
 	bad  bool
 }
+
+func NewSSEParser(path string) SSEParser { return SSEParser{chat: path == ChatPath} }
 
 var marks = [][]byte{[]byte(`message_start`), []byte(`message_delta`), []byte(`message_stop`), []byte(`error`)}
 
@@ -111,11 +114,32 @@ func (p *SSEParser) flush() {
 	line := bytes.TrimSuffix(p.line, []byte("\r"))
 	p.line = p.line[:0]
 	if p.over {
+		p.bad = p.bad || p.chat
 		p.over = false
 		return
 	}
+	if p.chat {
+		if name, ok := bytes.CutPrefix(line, []byte("event:")); ok && bytes.Equal(bytes.TrimSpace(name), []byte("error")) {
+			p.bad = true
+		}
+	}
 	payload, ok := bytes.CutPrefix(line, []byte("data:"))
 	if !ok {
+		return
+	}
+	if p.chat {
+		if p.stop {
+			p.bad = true
+			return
+		}
+		if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+			p.stop = true
+			return
+		}
+		var c chatReply
+		if json.Unmarshal(payload, &c) != nil || !c.update(&p.res) {
+			p.bad = true
+		}
 		return
 	}
 	var relevant bool
@@ -165,6 +189,6 @@ func (p *SSEParser) flush() {
 
 func (p *SSEParser) Result() Result {
 	r := p.res
-	r.Complete = p.stop && !p.bad
+	r.Complete = p.stop && !p.bad && (!p.chat || r.StopReason != "" && len(bytes.TrimSpace(p.line)) == 0 && !p.over)
 	return r
 }

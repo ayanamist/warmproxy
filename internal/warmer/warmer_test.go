@@ -46,7 +46,17 @@ func (u *upstream) Do(r *http.Request) (*http.Response, error) {
 		code = 200
 	}
 	rec.WriteHeader(code)
-	json.NewEncoder(rec).Encode(map[string]any{"type": "message", "stop_reason": "max_tokens", "usage": u.usage})
+	if strings.HasSuffix(r.URL.Path, anthropic.ChatPath) {
+		json.NewEncoder(rec).Encode(map[string]any{
+			"choices": []map[string]string{{"finish_reason": "length"}},
+			"usage": map[string]any{
+				"prompt_tokens": u.usage.Prompt(), "completion_tokens": u.usage.Output,
+				"prompt_tokens_details": map[string]int{"cached_tokens": u.usage.CacheRead, "cache_write_tokens": u.usage.CacheWrite},
+			},
+		})
+	} else {
+		json.NewEncoder(rec).Encode(map[string]any{"type": "message", "stop_reason": "max_tokens", "usage": u.usage})
+	}
 	return rec.Result(), nil
 }
 
@@ -584,6 +594,41 @@ func TestRestore(t *testing.T) {
 	}
 }
 
+func TestChatRefreshAfterRestore(t *testing.T) {
+	dir := t.TempDir()
+	a := newFixture(t, "idle", dir)
+	body := []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hello"}],"max_tokens":200,"max_completion_tokens":300,"stream":true,"stream_options":{"include_usage":true}}`)
+	info, err := anthropic.InspectChat(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := armInput(t, key('a'), "tool_use", 100_000)
+	in.Info, in.Body, in.Path, in.Query = info, body, anthropic.ChatPath, "tenant=test"
+	a.m.Arm(in)
+	a.m.Close()
+
+	b := newFixture(t, "idle", dir)
+	if n, err := b.m.Restore(); n != 1 || err != nil {
+		t.Fatalf("restored %d (%v)", n, err)
+	}
+	b.clk.Advance(270 * time.Second)
+	if b.up.count() != 1 || b.up.urls[0] != "http://magpie.test/v1/chat/completions?tenant=test" {
+		t.Fatalf("unexpected refresh URLs %v", b.up.urls)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(b.up.got[0]), &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["max_completion_tokens"]) != "1" || string(got["stream"]) != "false" ||
+		got["max_tokens"] != nil || got["stream_options"] != nil ||
+		string(got["messages"]) != `[{"role":"user","content":"hello"}]` {
+		t.Fatalf("unexpected refresh body %s", b.up.got[0])
+	}
+	if len(b.ledg.es) != 1 || !b.ledg.es[0].Hit || b.ledg.es[0].Usage.Input != 20 {
+		t.Fatalf("unexpected refresh ledger %+v", b.ledg.es)
+	}
+}
+
 func TestRestoreDropsWhatExpired(t *testing.T) {
 	dir := t.TempDir()
 	a := newFixture(t, "idle", dir)
@@ -637,13 +682,13 @@ func TestKey(t *testing.T) {
 	two := info(`{"role":"user","content":"b"}`)
 
 	named := func(k, s string) http.Header { return http.Header{"X-Api-Key": {k}, "X-Session-Affinity": {s}} }
-	if Key(named("k", "s1"), sessions, one) != Key(named("k", "s1"), sessions, two) {
+	if Key("/v1/messages", named("k", "s1"), sessions, one) != Key("/v1/messages", named("k", "s1"), sessions, two) {
 		t.Error("a named session is one conversation whatever its opening")
 	}
-	if Key(named("k", "s1"), sessions, one) == Key(named("k", "s2"), sessions, one) {
+	if Key("/v1/messages", named("k", "s1"), sessions, one) == Key("/v1/messages", named("k", "s2"), sessions, one) {
 		t.Error("two sessions share a key")
 	}
-	if Key(named("k1", "s"), sessions, one) == Key(named("k2", "s"), sessions, one) {
+	if Key("/v1/messages", named("k1", "s"), sessions, one) == Key("/v1/messages", named("k2", "s"), sessions, one) {
 		t.Error("two credentials share a key: their caches are separate")
 	}
 	// A subagent shares the parent's session id but not its system prompt or tools.
@@ -652,21 +697,21 @@ func TestKey(t *testing.T) {
 		return i
 	}
 	h := named("k", "s1")
-	if Key(h, sessions, agent("main", "")) != Key(h, sessions, agent("main", "")) {
+	if Key("/v1/messages", h, sessions, agent("main", "")) != Key("/v1/messages", h, sessions, agent("main", "")) {
 		t.Error("the same agent in a session must keep its key")
 	}
-	if Key(h, sessions, agent("main", "")) == Key(h, sessions, agent("sub", "")) {
+	if Key("/v1/messages", h, sessions, agent("main", "")) == Key("/v1/messages", h, sessions, agent("sub", "")) {
 		t.Error("a different system prompt in one session shares a key")
 	}
-	if Key(h, sessions, agent("main", "")) == Key(h, sessions, agent("main", `{"name":"t"}`)) {
+	if Key("/v1/messages", h, sessions, agent("main", "")) == Key("/v1/messages", h, sessions, agent("main", `{"name":"t"}`)) {
 		t.Error("a different toolset in one session shares a key")
 	}
 	plain := http.Header{"X-Api-Key": {"k"}}
-	if Key(plain, sessions, one) != Key(plain, sessions, one) || Key(plain, sessions, one) == Key(plain, sessions, two) {
+	if Key("/v1/messages", plain, sessions, one) != Key("/v1/messages", plain, sessions, one) || Key("/v1/messages", plain, sessions, one) == Key("/v1/messages", plain, sessions, two) {
 		t.Error("without a session the key follows how the conversation opens")
 	}
-	if Key(http.Header{"X-Magpie-Session": {"m"}, "X-Session-Affinity": {"a"}}, sessions, one) !=
-		Key(http.Header{"X-Magpie-Session": {"m"}}, sessions, one) {
+	if Key("/v1/messages", http.Header{"X-Magpie-Session": {"m"}, "X-Session-Affinity": {"a"}}, sessions, one) !=
+		Key("/v1/messages", http.Header{"X-Magpie-Session": {"m"}}, sessions, one) {
 		t.Error("X-Magpie-Session must come first")
 	}
 }

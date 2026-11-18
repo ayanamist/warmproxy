@@ -103,6 +103,79 @@ func TestStreamIsForwardedAndArms(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsArmsOnlyWithCompleteCacheUsage(t *testing.T) {
+	const path = "/v1/chat/completions"
+	const body = `{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"system","content":"rules"},{"role":"user","content":"hi"}]}`
+	const usage = `{"prompt_tokens":100000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":80000,"cache_write_tokens":19990}}`
+	const finish = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\r\n\r\n"
+	const metrics = "data: {\"choices\":[],\"usage\":" + usage + "}\n\n"
+	const done = "data: [DONE]\n\n"
+	for _, tc := range []struct {
+		name, body, reply, contentType string
+		armed                          bool
+	}{
+		{"sse", body, finish + metrics + done, "text/event-stream", true},
+		{"json", strings.Replace(body, "true", "false", 1), `{"choices":[{"finish_reason":"tool_calls"}],"usage":` + usage + "}", "application/json", true},
+		{"truncated", body, finish + metrics, "text/event-stream", false},
+		{"error event", body, finish + metrics + "data: {\"error\":{}}\n\n" + done, "text/event-stream", false},
+		{"no cache", body, finish + strings.Replace(metrics, "80000,\"cache_write_tokens\":19990", "0,\"cache_write_tokens\":0", 1) + done, "text/event-stream", false},
+		{"no usage", body, finish + done, "text/event-stream", false},
+		{"other model", strings.Replace(body, "claude-sonnet-5", "gpt-5", 1), finish + metrics + done, "text/event-stream", false},
+		{"reasoning", strings.Replace(body, "\"stream\":true", "\"stream\":true,\"reasoning_effort\":\"high\"", 1), finish + metrics + done, "text/event-stream", false},
+		{"oversized", body + strings.Repeat(" ", 1<<20), finish + metrics + done, "text/event-stream", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := setup(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				io.WriteString(w, tc.reply)
+			})
+			resp, got := post(t, e, path, tc.body, nil)
+			if resp.StatusCode != http.StatusOK || got != tc.reply || e.seen[0].body != tc.body {
+				t.Fatal("Chat request or response was altered")
+			}
+			st := e.mgr.Status()
+			if tc.armed {
+				if len(st) != 1 || st[0].Tokens != 100000 || st[0].Phase != "streaming" {
+					t.Fatalf("status = %+v, want an armed tool-call turn", st)
+				}
+			} else if len(st) != 0 {
+				t.Fatalf("unexpected armed status %+v", st)
+			}
+		})
+	}
+}
+
+func TestNonClaudeChatEndsOnlyTheMatchingRun(t *testing.T) {
+	const path = "/v1/chat/completions"
+	const body = `{"model":"claude-sonnet-5","messages":[{"role":"system","content":"main"},{"role":"user","content":"hi"}]}`
+	replies := []string{
+		`{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100000,"prompt_tokens_details":{"cached_tokens":99990}}}`,
+		`{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100000,"prompt_tokens_details":{"cached_tokens":99990}}}`,
+		`{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100000}}`,
+	}
+	nextReply := make(chan string, len(replies))
+	for _, reply := range replies {
+		nextReply <- reply
+	}
+	e := setup(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, <-nextReply)
+	})
+	post(t, e, path, body, nil)
+	main := e.mgr.Status()
+	if len(main) != 1 {
+		t.Fatalf("main did not arm: %+v", main)
+	}
+	post(t, e, path, strings.Replace(body, "main", "sub", 1), nil)
+	if st := e.mgr.Status(); len(st) != 2 {
+		t.Fatalf("subagent did not get its own run: %+v", st)
+	}
+	post(t, e, path, strings.Replace(body, "claude-sonnet-5", "gpt-5", 1), nil)
+	if st := e.mgr.Status(); len(st) != 1 || st[0].Session == main[0].Session {
+		t.Fatalf("expected only the subagent's run after switching to GPT: %+v", st)
+	}
+}
+
 // The reply reaches the client chunk by chunk, not when the upstream is done.
 func TestStreamIsNotBuffered(t *testing.T) {
 	release := make(chan struct{})

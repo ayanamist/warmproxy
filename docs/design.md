@@ -5,7 +5,7 @@
 ## 包布局
 
 - `internal/policy`：pi `cache-warming.ts` 的移植，纯函数：延迟、经济性公式。
-- `internal/anthropic`：解析请求（TTL、是否可重放）、构造预热体（`WarmBody`，除 `max_tokens` 和 `stream` 外字节不变）、解析 SSE 和 JSON 应答的 usage（含 `cache_creation` 的 5m/1h 拆分，用来校正实际 TTL）。
+- `internal/anthropic`：解析 Anthropic Messages 与 magpie 的 Claude Chat Completions 请求、构造预热体，并将 SSE 或 JSON 用量统一为未缓存输入、缓存读取、缓存写入和输出。
 - `internal/warmer`：`Manager` 按会话维护 run、定时刷新、落盘恢复（`Store`）、记账（`Ledger`）。依赖 `clock.Clock` 和 `Doer`，测试用 `clock.Fake`。
 - `internal/proxy`：`ReverseProxy` 加响应 tap，边转发边解析，完整结束后才布防。
 - `internal/config`：TOML 配置，拒绝未知键；`config.example.toml` 是示例。
@@ -31,6 +31,12 @@
 - 只有写入了缓存的应答才带这个信息。全部读缓存的应答看不出 TTL，`Arm` 会按 5 分钟处理；若之后某次预热写入报告 1 小时拆分，则沿用当前 TTL，不会把它升回去。若报告 5 分钟写入，`refresh` 会把 `TTL` 和 `delay` 降下来，从这次预热起按 5 分钟排期。
 - 预热的费用按应答里 5m/1h 的写入拆分分别按对应的 cache write 价计；拆分里没有的部分按 run 当前的 TTL 计。经济性检查（`EvaluateSplit`）用 run 的 TTL 取 cache write 价。
 - 上游不返回 `cache_creation` 拆分（非 Anthropic 后端）时按 5 分钟 TTL 处理。
+
+## Chat Completions
+
+2026-11-18 核对 magpie 的 [Chat 转译与回包](https://github.com/yetone/magpie/blob/e1c186cfee68e124a05defb621a4f435a457b1d7/internal/gateway/chat.go) 和 [Anthropic 请求构造](https://github.com/yetone/magpie/blob/e1c186cfee68e124a05defb621a4f435a457b1d7/internal/gateway/anthropic.go)。magpie 会为转译的 Chat 请求自动添加 Anthropic 缓存标记。它返回的 `prompt_tokens` 已包含缓存读写，减掉 `prompt_tokens_details.cached_tokens` 和 `cache_write_tokens` 才是未缓存后缀。该格式省略 TTL 拆分，warmproxy 按 5 分钟排期，未拆分的写入费用使用 5 分钟价估算。
+
+Chat 会话键带路径前缀，原 Messages 快照仍用原键。恢复时根据快照里的路径重建请求。由于 magpie 可能用输出上限派生 thinking 预算，带显式推理设置的 Chat 请求保守跳过。真实 magpie 实例的版本、路由及命中仍需验证。本地可用 `go test ./internal/proxy ./internal/warmer -run Chat -count=1` 验证 JSON、SSE、透传、重放与恢复。
 
 ## 经济性
 
