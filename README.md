@@ -1,6 +1,6 @@
 # warmproxy
 
-放在 magpie 前面的 Go 反向代理，对 `claude-sonnet*` 和 `claude-opus*` 的 `/v1/messages` 和 `/v1/chat/completions` 请求做提示缓存预热，策略移植自 pi 的 `cache-warming`。其他请求透传。
+放在 magpie 前面的 Go 反向代理，对符合模型和价格规则的 Claude `/v1/messages` 和 `/v1/chat/completions` 请求做提示缓存预热，策略移植自 pi 的 `cache-warming`。其他请求透传。
 
 ```
 客户端(agent) → warmproxy :3426 → magpie :3425 → Anthropic
@@ -44,6 +44,8 @@ journalctl --user -u warmproxy.service -f
 **Messages** 要求请求带 `cache_control`。预算式 thinking 和续用服务端 `thread` 的请求不预热。
 
 **Chat Completions** 依赖 magpie 转译为 Anthropic 请求时添加缓存标记。响应的 `usage.prompt_tokens_details` 必须报告正数的 `cached_tokens` 或 `cache_write_tokens` 才会布防。Chat 响应缺少 TTL 拆分，排期按 5 分钟。预热沿用原路径，关闭流式输出，移除 `stream_options`，将 `max_tokens` 或 `max_completion_tokens` 设为 1。显式推理设置（`reasoning_effort: "none"` 除外）、服务端会话、网页搜索和多候选请求跳过预热。
+
+顶层 `match` 和每条 `[[model]].match` 都直接对客户端传入的完整模型名应用正则。顶层默认值 `claude-` 匹配包含这段文字的模型名，包括 `claude-sonnet-5-5` 和 `cursor/claude-sonnet-5-5@1m`。[示例配置](config.example.toml) 的价格规则也显式覆盖这两种写法，按配置顺序使用第一条匹配的价格。升级时如果现有配置里写了 `^claude-…`，需要同时调整顶层筛选和相关价格正则才能覆盖带前缀的模型名。
 
 ## 会话键
 

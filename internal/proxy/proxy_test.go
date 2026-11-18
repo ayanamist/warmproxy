@@ -50,7 +50,7 @@ func setup(t *testing.T, reply http.HandlerFunc) *env {
 	t.Cleanup(up.Close)
 
 	p := filepath.Join(t.TempDir(), "c.toml")
-	os.WriteFile(p, []byte("[[model]]\nmatch = \"^claude\"\ninput = 3\noutput = 15\n"), 0o600)
+	os.WriteFile(p, []byte("match = \"^([^/]+/)*claude-(sonnet|opus)\"\n[[model]]\nmatch = \"^([^/]+/)*claude-\"\ninput = 3\noutput = 15\n"), 0o600)
 	cfg, err := config.Load(p)
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +115,7 @@ func TestChatCompletionsArmsOnlyWithCompleteCacheUsage(t *testing.T) {
 		armed                          bool
 	}{
 		{"sse", body, finish + metrics + done, "text/event-stream", true},
+		{"namespaced Claude", strings.Replace(body, "claude-sonnet-5", "cursor/claude-sonnet-5-5@1m", 1), finish + metrics + done, "text/event-stream", true},
 		{"json", strings.Replace(body, "true", "false", 1), `{"choices":[{"finish_reason":"tool_calls"}],"usage":` + usage + "}", "application/json", true},
 		{"truncated", body, finish + metrics, "text/event-stream", false},
 		{"error event", body, finish + metrics + "data: {\"error\":{}}\n\n" + done, "text/event-stream", false},

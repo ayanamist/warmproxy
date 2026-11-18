@@ -78,7 +78,7 @@ func defaults() file {
 		Listen:         "127.0.0.1:3426",
 		Upstream:       "http://127.0.0.1:3425",
 		StateDir:       "~/.local/state/warmproxy",
-		Match:          "^claude-(sonnet|opus)",
+		Match:          "claude-",
 		MaxBodyBytes:   32 << 20,
 		RequestTimeout: "60s",
 		SessionHeaders: []string{
@@ -173,7 +173,7 @@ func build(f file) (*Config, error) {
 	return c, nil
 }
 
-// RuleFor is the first price rule matching model; a model without one is never warmed.
+// RuleFor uses the first price rule matching the original model name.
 func (c *Config) RuleFor(model string) (policy.Price, bool) {
 	for _, r := range c.Rules {
 		if r.Match.MatchString(model) {

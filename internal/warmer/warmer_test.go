@@ -85,7 +85,7 @@ func (l *memLedger) Record(e Entry) { l.mu.Lock(); l.es = append(l.es, e); l.mu.
 func newCfg(t *testing.T, mode string) *config.Config {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "c.toml")
-	text := "warm.mode = \"" + mode + "\"\n[[model]]\nmatch = \"^claude\"\ninput = 3\noutput = 15\n"
+	text := "warm.mode = \"" + mode + "\"\n[[model]]\nmatch = \"^([^/]+/)*claude-\"\ninput = 3\noutput = 15\n"
 	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -597,7 +597,7 @@ func TestRestore(t *testing.T) {
 func TestChatRefreshAfterRestore(t *testing.T) {
 	dir := t.TempDir()
 	a := newFixture(t, "idle", dir)
-	body := []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hello"}],"max_tokens":200,"max_completion_tokens":300,"stream":true,"stream_options":{"include_usage":true}}`)
+	body := []byte(`{"model":"cursor/claude-sonnet-5-5@1m","messages":[{"role":"user","content":"hello"}],"max_tokens":200,"max_completion_tokens":300,"stream":true,"stream_options":{"include_usage":true}}`)
 	info, err := anthropic.InspectChat(body)
 	if err != nil {
 		t.Fatal(err)
@@ -621,6 +621,7 @@ func TestChatRefreshAfterRestore(t *testing.T) {
 	}
 	if string(got["max_completion_tokens"]) != "1" || string(got["stream"]) != "false" ||
 		got["max_tokens"] != nil || got["stream_options"] != nil ||
+		string(got["model"]) != `"cursor/claude-sonnet-5-5@1m"` ||
 		string(got["messages"]) != `[{"role":"user","content":"hello"}]` {
 		t.Fatalf("unexpected refresh body %s", b.up.got[0])
 	}

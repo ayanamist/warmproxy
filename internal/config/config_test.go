@@ -27,11 +27,42 @@ func TestDefaults(t *testing.T) {
 		c.MaxAgeIdle != 30*time.Minute || c.MaxAgeStreaming != time.Hour {
 		t.Errorf("%+v", c)
 	}
-	if !c.Match.MatchString("claude-sonnet-5") || !c.Match.MatchString("claude-opus-5-5") || c.Match.MatchString("claude-haiku-5") {
-		t.Error("the default match must cover Sonnet and Opus only")
+	for _, name := range []string{"claude-sonnet-5", "claude-opus-5-5", "claude-haiku-5", "cursor/claude-sonnet-5-5@1m", "test-claude-sonnet-5-5"} {
+		if !c.Match.MatchString(name) {
+			t.Errorf("default match rejected %q", name)
+		}
 	}
-	if _, ok := c.RuleFor("claude-sonnet-5"); ok {
+	if c.Match.MatchString("cursor/gpt-5") || c.Match.MatchString("group/primary") {
+		t.Error("default match accepted a name that does not identify Claude")
+	}
+	if _, ok := c.RuleFor("cursor/claude-haiku-5"); ok {
 		t.Error("without a price a model is never warmed")
+	}
+}
+
+func TestClaudeRulesUseOriginalModelName(t *testing.T) {
+	c, err := load(t, `
+match = "^claude-(sonnet|opus)"
+
+[[model]]
+match = "^claude-sonnet-5-5"
+input = 2
+output = 10
+
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const model = "cursor/claude-sonnet-5-5@1m"
+	if _, ok := c.RuleFor(model); c.Match.MatchString(model) || ok {
+		t.Fatal("bare Claude rules matched a namespaced model")
+	}
+	example, err := Load("../../config.example.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if price, ok := example.RuleFor(model); !example.Match.MatchString(model) || !ok || price.CacheRead != 0.1 {
+		t.Errorf("example did not pick the Sonnet 5.5 rule for %s: %+v, found=%t", model, price, ok)
 	}
 }
 

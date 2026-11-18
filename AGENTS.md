@@ -1,6 +1,6 @@
 # warmproxy
 
-放在 magpie 前面的 Go 反向代理，对 magpie 上的 Claude Sonnet/Opus 做提示缓存预热。用户对话使用中文。
+放在 magpie 前面的 Go 反向代理，为符合配置中模型和价格规则的请求做提示缓存预热。用户对话使用中文。
 
 ## 命令
 

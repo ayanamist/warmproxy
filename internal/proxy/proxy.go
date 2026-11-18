@@ -127,15 +127,11 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		s.rp.ServeHTTP(w, r)
 		return
 	}
-	eligible := s.cfg.Match.MatchString(info.Model)
-	if r.URL.Path == anthropic.ChatPath {
-		eligible = eligible && strings.HasPrefix(info.Model, "claude-")
-	}
 	t := &tapCtx{
 		info: info, body: body, header: r.Header.Clone(),
 		path: r.URL.Path, query: r.URL.RawQuery, started: started,
 		key:      warmer.Key(r.URL.Path, r.Header, s.cfg.SessionHeaders, info),
-		unwarmed: !eligible,
+		unwarmed: !s.cfg.Match.MatchString(info.Model),
 	}
 	s.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, t)))
 }
@@ -161,7 +157,7 @@ func (s *Server) modify(resp *http.Response) error {
 			return
 		}
 		if t.unwarmed {
-			s.log.Debug("not warming", "path", t.path, "reason", "model is not eligible")
+			s.log.Debug("not warming", "path", t.path, "reason", "model did not match")
 			s.mgr.Disarm(t.key)
 			return
 		}

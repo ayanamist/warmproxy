@@ -3,7 +3,7 @@
 listen = "127.0.0.1:3426"          # 非回环地址会告警：代理持有它见过的所有凭证
 upstream = "http://127.0.0.1:3425" # magpie 网关；预热请求也只发往这里
 state_dir = "~/.local/state/warmproxy"
-match = "^claude-(sonnet|opus)"    # 只对匹配的模型预热，其余请求原样透传
+match = "claude-"                 # 模型名包含 claude-；还需匹配价格规则
 max_body_bytes = 33554432          # 可缓冲的请求体上限（字节），超过返回 413
 # 单次预热请求的总超时，包括连接、发送、等待和读取响应。
 # 真实请求不受此限制，长输出不会被它打断。
@@ -34,34 +34,35 @@ max_age_streaming = "1h"     # tool_use 会话
 max_age_idle = "30m"         # 其余会话
 
 # 价格：美元 / 百万 token，取自 models.dev（2026-11-14）。没有匹配的价格就不预热。
+# 按顺序使用第一条匹配完整名称的规则。供应商专用规则可放在通用规则前。
 # cache_read、cache_write_5m、cache_write_1h 省略时按 input 的 0.1、1.25、2 倍推算。
 [[model]]
-match = "^claude-sonnet-5-5"
+match = "^([^/]+/)*claude-sonnet-5-5"
 input = 2
 output = 10
 cache_read = 0.1
 cache_write_5m = 2.5
 
 [[model]]
-match = "^claude-sonnet-5"
+match = "^([^/]+/)*claude-sonnet-5"
 input = 2
 output = 10
 cache_read = 0.2
 cache_write_5m = 2.5
 
 [[model]]
-match = "^claude-sonnet-4"
+match = "^([^/]+/)*claude-sonnet-4"
 input = 3
 output = 15
 
 [[model]]
-match = "^claude-opus-5-5"
+match = "^([^/]+/)*claude-opus-5-5"
 input = 4
 output = 20
 cache_read = 0.2
 cache_write_5m = 5
 
 [[model]]
-match = "^claude-opus-"
+match = "^([^/]+/)*claude-opus-"
 input = 5
 output = 25

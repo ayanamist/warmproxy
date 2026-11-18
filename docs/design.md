@@ -38,6 +38,8 @@
 
 Chat 会话键带路径前缀，原 Messages 快照仍用原键。恢复时根据快照里的路径重建请求。由于 magpie 可能用输出上限派生 thinking 预算，带显式推理设置的 Chat 请求保守跳过。真实 magpie 实例的版本、路由及命中仍需验证。本地可用 `go test ./internal/proxy ./internal/warmer -run Chat -count=1` 验证 JSON、SSE、透传、重放与恢复。
 
+2026-11-18 在 devcloud 观察到客户端提交 `cursor/claude-sonnet-5-5@1m`。顶层筛选与价格规则统一匹配原始模型名，由示例配置的正则显式覆盖供应商前缀。转发、快照和重放保留模型名以及 `@1m` 后缀。可用 `go test ./internal/config ./internal/proxy ./internal/warmer -run 'Claude|Chat' -count=1` 验证示例配置及重放模型名。
+
 ## 经济性
 
 `usage.input_tokens` 是最后一个缓存断点之后的未缓存后缀，重放时仍按输入价计费，不会变成 cache read。run 分别记 `Tokens`（全部）和 `Uncached`，`policy.EvaluateSplit` 只用前缀算可避免的 miss 成本，把后缀计入每次预热成本；hit 的判断也只看前缀。
